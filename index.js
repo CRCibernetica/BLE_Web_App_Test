@@ -1,65 +1,93 @@
 document.addEventListener('DOMContentLoaded', () => {
-    // DOM Element References
+    // --- DOM Element References ---
     const connectButton = document.getElementById('connectButton');
     const disconnectButton = document.getElementById('disconnectButton');
     const statusMessages = document.getElementById('statusMessages');
-    const deviceInfo = document.getElementById('deviceInfo');
+    const deviceInfoDiv = document.getElementById('deviceInfo');
     const deviceNameSpan = document.getElementById('deviceName');
     const deviceIdSpan = document.getElementById('deviceId');
+    const chartCanvas = document.getElementById('plotterChart');
 
-    // Global variables to hold device and server instances
+    // --- BLE Service & Characteristic UUIDs ---
+    const UART_SERVICE_UUID = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+    // Characteristic for receiving data from the device (peripheral's TX)
+    const UART_TX_CHAR_UUID = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+
+    // --- Global State ---
     let bleDevice = null;
     let gattServer = null;
+    let uartTxCharacteristic = null;
+    let chart = null;
+    let incomingDataBuffer = ''; // Buffer for incoming BLE data
+    const chartColors = ['#4A90E2', '#F5A623', '#50E3C2', '#BD10E0', '#7ED321', '#E0103E'];
 
-    // --- Event Listeners ---
+    // --- Initialization ---
+    initChart();
     connectButton.addEventListener('click', requestDevice);
     disconnectButton.addEventListener('click', disconnectDevice);
 
     /**
-     * Checks if Web Bluetooth is available in the browser.
-     * @returns {boolean} True if Web Bluetooth is supported.
+     * Initializes the Chart.js instance with a default configuration.
      */
-    function isWebBluetoothSupported() {
-        if (!navigator.bluetooth) {
-            updateStatus('Web Bluetooth API is not available in this browser. Please try a supported browser like Chrome.');
-            return false;
-        }
-        return true;
+    function initChart() {
+        const ctx = chartCanvas.getContext('2d');
+        chart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: [],
+                datasets: []
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    x: {
+                        title: { display: true, text: 'Time' },
+                        ticks: { color: '#9CA3AF' },
+                        grid: { color: 'rgba(156, 163, 175, 0.1)' }
+                    },
+                    y: {
+                        title: { display: true, text: 'Value' },
+                        ticks: { color: '#9CA3AF' },
+                        grid: { color: 'rgba(156, 163, 175, 0.1)' }
+                    }
+                },
+                plugins: {
+                    legend: { labels: { color: '#D1D5DB' } }
+                },
+                animation: { duration: 200 }
+            }
+        });
     }
 
     /**
-     * Scans for BLE devices and initiates a connection.
+     * Scans for BLE devices, connects, and starts UART notifications.
      */
     async function requestDevice() {
-        if (!isWebBluetoothSupported()) {
+        if (!navigator.bluetooth) {
+            updateStatus('Web Bluetooth API is not available in this browser.', 'error');
             return;
         }
 
         updateStatus('Scanning for devices with name starting with "Idea"...');
-
         try {
-            // Request a device using a filter. 
-            // This filter looks for devices with a name that starts with "Idea".
-            // The 'optionalServices' key is needed to get permission for services that are not part of the filter.
             bleDevice = await navigator.bluetooth.requestDevice({
-                filters: [{
-                    namePrefix: 'Idea'
-                }],
-                optionalServices: ['6e400001-b5a3-f393-e0a9-e50e24dcca9e'] // Nordic UART Service
+                filters: [{ namePrefix: 'Idea' }],
+                optionalServices: [UART_SERVICE_UUID]
             });
 
-            // Add an event listener for when the device gets disconnected
             bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
-
             updateStatus('Connecting to GATT Server...');
             gattServer = await bleDevice.gatt.connect();
 
-            updateStatus('Connected successfully!', 'success');
+            updateStatus('Connected! Getting UART Service...');
+            await startUartNotifications(gattServer);
+            
+            updateStatus('Listening for data...', 'success');
             updateUIAfterConnection();
 
         } catch (error) {
             console.error('Connection failed:', error);
-            // Handle cases where no device is selected or connection fails
             if (error.name === 'NotFoundError') {
                 updateStatus('No device selected. Scan cancelled.');
             } else {
@@ -69,46 +97,138 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     /**
-     * Disconnects from the currently connected BLE device.
+     * Gets the UART service and characteristic, then starts listening for notifications.
+     * @param {BluetoothRemoteGATTServer} server
+     */
+    async function startUartNotifications(server) {
+        const service = await server.getPrimaryService(UART_SERVICE_UUID);
+        uartTxCharacteristic = await service.getCharacteristic(UART_TX_CHAR_UUID);
+        await uartTxCharacteristic.startNotifications();
+        uartTxCharacteristic.addEventListener('characteristicvaluechanged', handleNotifications);
+    }
+
+    /**
+     * Handles incoming data from the BLE device.
+     * @param {Event} event
+     */
+    function handleNotifications(event) {
+        const value = event.target.value;
+        const decoder = new TextDecoder();
+        const text = decoder.decode(value);
+
+        incomingDataBuffer += text;
+
+        // Process all complete lines (ending in newline) in the buffer
+        let newlineIndex;
+        while ((newlineIndex = incomingDataBuffer.indexOf('\n')) !== -1) {
+            const line = incomingDataBuffer.substring(0, newlineIndex).trim();
+            incomingDataBuffer = incomingDataBuffer.substring(newlineIndex + 1);
+
+            if (line) {
+                const values = line.split(',').map(v => parseFloat(v.trim()));
+                updateChart(values);
+            }
+        }
+    }
+
+    /**
+     * Updates the chart with new data points.
+     * @param {number[]} values - An array of numerical values for each series.
+     */
+    function updateChart(values) {
+        // Add a new label for the x-axis (e.g., a timestamp or count)
+        const newLabel = chart.data.labels.length;
+        chart.data.labels.push(newLabel);
+
+        // Limit the number of data points to keep the chart performant
+        const maxDataPoints = 100;
+        if (chart.data.labels.length > maxDataPoints) {
+            chart.data.labels.shift();
+        }
+
+        values.forEach((value, index) => {
+            // Check if a dataset for this series already exists
+            if (!chart.data.datasets[index]) {
+                const color = chartColors[index % chartColors.length];
+                chart.data.datasets[index] = {
+                    label: `Series ${index + 1}`,
+                    data: [],
+                    borderColor: color,
+                    backgroundColor: `${color}33`, // Semi-transparent version for fill
+                    fill: false,
+                    tension: 0.2
+                };
+            }
+            
+            // Add the new data point
+            chart.data.datasets[index].data.push(value);
+            
+            // Remove the oldest data point if we're over the limit
+            if (chart.data.datasets[index].data.length > maxDataPoints) {
+                chart.data.datasets[index].data.shift();
+            }
+        });
+
+        chart.update();
+    }
+
+    /**
+     * Disconnects from the BLE device.
      */
     function disconnectDevice() {
         if (bleDevice && bleDevice.gatt.connected) {
             updateStatus('Disconnecting...');
             bleDevice.gatt.disconnect();
-        } else {
-            updateStatus('No device connected.', 'error');
         }
     }
 
     /**
-     * Handles the 'gattserverdisconnected' event.
+     * Handles disconnection events and resets the state.
      */
     function onDisconnected() {
         updateStatus('Device has been disconnected.');
+        
+        // Clean up event listeners
+        if (uartTxCharacteristic) {
+            uartTxCharacteristic.removeEventListener('characteristicvaluechanged', handleNotifications);
+            uartTxCharacteristic = null;
+        }
+        
         gattServer = null;
         bleDevice = null;
+        incomingDataBuffer = '';
+        
         updateUIAfterDisconnection();
+        resetChart();
     }
-
+    
     /**
-     * Updates the UI elements after a successful connection.
+     * Resets the chart to its initial empty state.
+     */
+    function resetChart() {
+        chart.data.labels = [];
+        chart.data.datasets = [];
+        chart.update();
+    }
+    
+    /**
+     * Updates UI elements after a successful connection.
      */
     function updateUIAfterConnection() {
         connectButton.style.display = 'none';
         disconnectButton.style.display = 'block';
-
         deviceNameSpan.textContent = bleDevice.name || 'N/A';
         deviceIdSpan.textContent = bleDevice.id;
-        deviceInfo.style.display = 'block';
+        deviceInfoDiv.style.display = 'block';
     }
 
     /**
-     * Resets the UI elements after disconnection.
+     * Resets UI elements after disconnection.
      */
     function updateUIAfterDisconnection() {
         connectButton.style.display = 'block';
         disconnectButton.style.display = 'none';
-        deviceInfo.style.display = 'none';
+        deviceInfoDiv.style.display = 'none';
     }
 
     /**
@@ -121,19 +241,11 @@ document.addEventListener('DOMContentLoaded', () => {
         const p = document.createElement('p');
         p.textContent = message;
 
-        // Reset classes
         p.className = 'text-sm';
-
         switch (type) {
-            case 'success':
-                p.classList.add('text-green-600', 'dark:text-green-400');
-                break;
-            case 'error':
-                p.classList.add('text-red-600', 'dark:text-red-400');
-                break;
-            default:
-                p.classList.add('text-gray-600', 'dark:text-gray-300');
-                break;
+            case 'success': p.classList.add('text-green-500', 'dark:text-green-400'); break;
+            case 'error': p.classList.add('text-red-500', 'dark:text-red-400'); break;
+            default: p.classList.add('text-gray-600', 'dark:text-gray-300'); break;
         }
         statusMessages.appendChild(p);
     }
