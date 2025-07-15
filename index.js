@@ -35,15 +35,17 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        updateStatus('Scanning for devices...');
+        updateStatus('Scanning for devices with name starting with "Idea"...');
 
         try {
-            // Request a device with the 'acceptAllDevices' option.
-            // You can be more specific by filtering for services.
-            // For example: options: { filters: [{ services: ['battery_service'] }] }
+            // Request a device using a filter. 
+            // This filter looks for devices with a name that starts with "Idea".
+            // The 'optionalServices' key is needed to get permission for services that are not part of the filter.
             bleDevice = await navigator.bluetooth.requestDevice({
-                acceptAllDevices: true,
-                // optionalServices: ['battery_service'] // Example of an optional service
+                filters: [{
+                    namePrefix: 'Idea'
+                }],
+                optionalServices: ['6e400001-b5a3-f393-e0a9-e50e24dcca9e'] // Nordic UART Service
             });
 
             // Add an event listener for when the device gets disconnected
@@ -57,7 +59,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         } catch (error) {
             console.error('Connection failed:', error);
-            updateStatus(`Error: ${error.message}`, 'error');
+            // Handle cases where no device is selected or connection fails
+            if (error.name === 'NotFoundError') {
+                updateStatus('No device selected. Scan cancelled.');
+            } else {
+                updateStatus(`Error: ${error.message}`, 'error');
+            }
         }
     }
 
