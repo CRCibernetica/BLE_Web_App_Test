@@ -78,14 +78,19 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         updateStatus('Scanning for devices...');
         try {
+            // Filter on the UART service UUID, not the device name. The name may
+            // not fit in the advertising packet alongside the 128-bit UUID, so a
+            // namePrefix filter can hide the device from the chooser entirely.
             bleDevice = await navigator.bluetooth.requestDevice({
-                filters: [{ namePrefix: 'Idea' }],
+                filters: [{ services: [UART_SERVICE_UUID] }],
                 optionalServices: [UART_SERVICE_UUID]
             });
             bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
+            updateStatus(`Connecting to ${bleDevice.name || 'device'}...`);
             gattServer = await bleDevice.gatt.connect();
             await new Promise(resolve => setTimeout(resolve, 500));
             await startUartNotifications(gattServer);
+            incomingDataBuffer = '';
             updateStatus('Listening for data...', 'success');
             updateUIAfterConnection();
         } catch (error) {
@@ -95,6 +100,14 @@ document.addEventListener('DOMContentLoaded', () => {
             } else {
                 updateStatus(`Error: ${error.message}`, 'error');
             }
+            // Leave no half-connected device behind, or the next attempt fails too.
+            if (bleDevice) {
+                bleDevice.removeEventListener('gattserverdisconnected', onDisconnected);
+                if (bleDevice.gatt.connected) bleDevice.gatt.disconnect();
+            }
+            bleDevice = null;
+            gattServer = null;
+            uartTxCharacteristic = null;
         }
     }
 
@@ -122,8 +135,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (line) {
                 const values = line.split(',').map(v => parseFloat(v.trim()));
+                // Ignore non-numeric chatter (boot banners, REPL output, etc.)
+                if (values.length === 0 || values.some(v => Number.isNaN(v))) {
+                    console.log('Skipping non-numeric line:', line);
+                    continue;
+                }
                 const timestamp = Date.now();
-                
+
                 // Store all data for the session
                 sessionData.push({ timestamp, values });
 
@@ -231,6 +249,7 @@ document.addEventListener('DOMContentLoaded', () => {
         gattServer = null;
         uartTxCharacteristic = null;
         sessionData = [];
+        incomingDataBuffer = '';
         isPaused = false;
         
         updateUIAfterDisconnection();
