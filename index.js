@@ -84,6 +84,7 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
             gattServer = await bleDevice.gatt.connect();
+            await new Promise(resolve => setTimeout(resolve, 500));
             await startUartNotifications(gattServer);
             updateStatus('Listening for data...', 'success');
             updateUIAfterConnection();
