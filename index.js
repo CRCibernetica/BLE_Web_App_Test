@@ -1,6 +1,7 @@
 document.addEventListener('DOMContentLoaded', () => {
     // --- DOM Element References ---
     const connectButton = document.getElementById('connectButton');
+    const scanAllButton = document.getElementById('scanAllButton');
     const disconnectButton = document.getElementById('disconnectButton');
     const pauseButton = document.getElementById('pauseButton');
     const saveButton = document.getElementById('saveButton');
@@ -17,7 +18,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // --- Global State ---
     let bleDevice = null;
     let gattServer = null;
-    let uartTxCharacteristic = null;
+    let notifyCharacteristics = [];
     let chart = null;
     let incomingDataBuffer = '';
     let sessionData = []; // Stores all data for the session {timestamp, values}
@@ -27,7 +28,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- Initialization ---
     initChart();
-    connectButton.addEventListener('click', requestDevice);
+    // Wrap, don't pass directly: the click event object would arrive as `scanAll`.
+    connectButton.addEventListener('click', () => requestDevice(false));
+    scanAllButton.addEventListener('click', () => requestDevice(true));
     disconnectButton.addEventListener('click', disconnectDevice);
     pauseButton.addEventListener('click', togglePause);
     saveButton.addEventListener('click', downloadCSV);
@@ -71,28 +74,32 @@ document.addEventListener('DOMContentLoaded', () => {
     /**
      * Scans for BLE devices, connects, and starts UART notifications.
      */
-    async function requestDevice() {
+    async function requestDevice(scanAll = false) {
         if (!navigator.bluetooth) {
             updateStatus('Web Bluetooth API is not available.', 'error');
             return;
         }
-        updateStatus('Scanning for devices...');
+        updateStatus(scanAll ? 'Showing all nearby devices...' : 'Scanning for devices...');
         try {
-            // Filter on the UART service UUID, not the device name. The name may
-            // not fit in the advertising packet alongside the 128-bit UUID, so a
-            // namePrefix filter can hide the device from the chooser entirely.
-            bleDevice = await navigator.bluetooth.requestDevice({
-                filters: [{ services: [UART_SERVICE_UUID] }],
-                optionalServices: [UART_SERVICE_UUID]
-            });
+            // Match on the UART service UUID *or* the name. The name may not fit in
+            // the advertising packet alongside the 128-bit UUID, so a namePrefix
+            // filter alone can hide the device from the chooser entirely.
+            const options = scanAll
+                ? { acceptAllDevices: true, optionalServices: [UART_SERVICE_UUID] }
+                : {
+                    filters: [{ services: [UART_SERVICE_UUID] }, { namePrefix: 'Idea' }],
+                    optionalServices: [UART_SERVICE_UUID]
+                };
+            bleDevice = await navigator.bluetooth.requestDevice(options);
             bleDevice.addEventListener('gattserverdisconnected', onDisconnected);
             updateStatus(`Connecting to ${bleDevice.name || 'device'}...`);
             gattServer = await bleDevice.gatt.connect();
             await new Promise(resolve => setTimeout(resolve, 500));
             await startUartNotifications(gattServer);
             incomingDataBuffer = '';
-            updateStatus('Listening for data...', 'success');
+            updateStatus('Connected. Waiting for data...', 'success');
             updateUIAfterConnection();
+            warnIfNoData();
         } catch (error) {
             console.error('Connection failed:', error);
             if (error.name === 'NotFoundError') {
@@ -107,7 +114,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             bleDevice = null;
             gattServer = null;
-            uartTxCharacteristic = null;
+            notifyCharacteristics = [];
         }
     }
 
@@ -116,9 +123,39 @@ document.addEventListener('DOMContentLoaded', () => {
      */
     async function startUartNotifications(server) {
         const service = await server.getPrimaryService(UART_SERVICE_UUID);
-        uartTxCharacteristic = await service.getCharacteristic(UART_TX_CHAR_UUID);
-        await uartTxCharacteristic.startNotifications();
-        uartTxCharacteristic.addEventListener('characteristicvaluechanged', handleNotifications);
+
+        // Subscribe to every characteristic that can notify rather than hardcoding
+        // 6e400003. Firmware revisions move which characteristic carries the data,
+        // and a hardcoded UUID turns that into a hard failure.
+        let subscribed = 0;
+        for (const c of await service.getCharacteristics()) {
+            if (!c.properties.notify && !c.properties.indicate) continue;
+            try {
+                await c.startNotifications();
+                c.addEventListener('characteristicvaluechanged', handleNotifications);
+                notifyCharacteristics.push(c);
+                subscribed++;
+                console.log('Subscribed to', c.uuid);
+            } catch (e) {
+                console.warn(`Could not subscribe to ${c.uuid}:`, e.message);
+            }
+        }
+        if (!subscribed) {
+            throw new Error('No characteristic on this service can notify.');
+        }
+    }
+
+    /**
+     * The promises above can all resolve against a cached GATT database with no
+     * live radio link, so a successful connect proves nothing on its own. Say so
+     * out loud instead of showing "listening" forever.
+     */
+    function warnIfNoData() {
+        setTimeout(() => {
+            if (bleDevice && bleDevice.gatt.connected && sessionData.length === 0) {
+                updateStatus('Connected but no data after 4s. Check the board\'s serial console: if it still prints "Anunciando servicios BLE", the link is not real.', 'error');
+            }
+        }, 4000);
     }
 
     /**
@@ -126,7 +163,9 @@ document.addEventListener('DOMContentLoaded', () => {
      */
     function handleNotifications(event) {
         const decoder = new TextDecoder();
-        incomingDataBuffer += decoder.decode(event.target.value);
+        const chunk = decoder.decode(event.target.value);
+        console.log('RX:', JSON.stringify(chunk));
+        incomingDataBuffer += chunk;
 
         let newlineIndex;
         while ((newlineIndex = incomingDataBuffer.indexOf('\n')) !== -1) {
@@ -242,12 +281,11 @@ document.addEventListener('DOMContentLoaded', () => {
      */
     function onDisconnected() {
         updateStatus('Device disconnected.');
-        if (uartTxCharacteristic) {
-            uartTxCharacteristic.removeEventListener('characteristicvaluechanged', handleNotifications);
-        }
+        notifyCharacteristics.forEach(c =>
+            c.removeEventListener('characteristicvaluechanged', handleNotifications));
+        notifyCharacteristics = [];
         bleDevice = null;
         gattServer = null;
-        uartTxCharacteristic = null;
         sessionData = [];
         incomingDataBuffer = '';
         isPaused = false;
@@ -265,6 +303,7 @@ document.addEventListener('DOMContentLoaded', () => {
     
     function updateUIAfterConnection() {
         connectButton.style.display = 'none';
+        scanAllButton.style.display = 'none';
         disconnectButton.style.display = 'block';
         pauseButton.disabled = false;
         saveButton.disabled = false;
@@ -275,6 +314,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function updateUIAfterDisconnection() {
         connectButton.style.display = 'block';
+        scanAllButton.style.display = 'block';
         disconnectButton.style.display = 'none';
         pauseButton.disabled = true;
         saveButton.disabled = true;
