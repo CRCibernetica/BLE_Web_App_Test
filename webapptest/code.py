@@ -41,6 +41,17 @@ while True:
     except Exception:  # noqa: BLE001
         write_ok = False
 
+    # Advertising stops as soon as a central connects, and nothing restarts it
+    # on disconnect. Without this the board is unreachable after the first
+    # disconnect until you reset it. A failing write is the signal that nobody
+    # is listening; ble.connected is not trustworthy, which is the whole point
+    # of this test. Re-calling while already advertising just raises.
+    if not write_ok:
+        try:
+            ble.start_advertising(advertisement)
+        except Exception:  # noqa: BLE001
+            pass
+
     # len(ble.connections) distinguishes the two failure shapes: 0 means no
     # connection object was created for this run at all, which points at the
     # bonded-reconnect path rather than at the flag itself.
