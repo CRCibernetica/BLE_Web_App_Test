@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ble.connected test</title>
+<style>
+  body { font: 15px/1.6 system-ui, sans-serif; max-width: 40em; margin: 2em auto; padding: 0 1em; }
+  button { font: inherit; padding: .5em 1em; }
+  #count { font: 600 3em/1 ui-monospace, monospace; }
+  #log { font: 13px/1.5 ui-monospace, monospace; white-space: pre-wrap;
+         background: #f4f4f4; padding: 1em; height: 12em; overflow-y: auto; }
+</style>
+</head>
+<body>
+
+<h1><code>ble.connected</code> test</h1>
+
+<p>Run <code>code.py</code> on the board, then connect. If numbers appear here
+while the board's serial console prints
+<code>write_ok: True | ble.connected: False</code>, the bug is confirmed: the
+link is live and the flag is wrong.</p>
+
+<p><button id="connect">Connect</button></p>
+
+<p>Received: <span id="count">—</span></p>
+
+<div id="log"></div>
+
+<script>
+const UART_SERVICE = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const UART_TX_CHAR = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+
+const log = (msg) => {
+  document.getElementById('log').textContent += msg + '\n';
+  document.getElementById('log').scrollTop = 1e9;
+};
+
+document.getElementById('connect').addEventListener('click', async () => {
+  try {
+    log('Requesting device...');
+    const device = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [UART_SERVICE] }],
+      optionalServices: [UART_SERVICE]
+    });
+    log(`Selected: ${device.name || '(no name)'}`);
+
+    device.addEventListener('gattserverdisconnected', () => log('Disconnected.'));
+
+    const server = await device.gatt.connect();
+    const service = await server.getPrimaryService(UART_SERVICE);
+    const characteristic = await service.getCharacteristic(UART_TX_CHAR);
+    await characteristic.startNotifications();
+
+    characteristic.addEventListener('characteristicvaluechanged', (event) => {
+      const text = new TextDecoder().decode(event.target.value).trim();
+      document.getElementById('count').textContent = text;
+      log('RX: ' + text);
+    });
+
+    log('Connected. Waiting for data...');
+  } catch (error) {
+    log('FAILED: ' + error.message);
+  }
+});
+</script>
+
+</body>
+</html>
