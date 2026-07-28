@@ -21,7 +21,14 @@ while the board's serial console prints
 <code>write_ok: True | ble.connected: False</code>, the bug is confirmed: the
 link is live and the flag is wrong.</p>
 
-<p><button id="connect">Connect</button></p>
+<p>
+  <button id="connect">Connect</button>
+  <button id="disconnect" disabled>Disconnect</button>
+</p>
+
+<p><small>To test whether an unclean teardown causes the bug: click
+<b>Disconnect</b> before restarting <code>code.py</code>. Compare against
+restarting <code>code.py</code> while still connected.</small></p>
 
 <p>Received: <span id="count">—</span></p>
 
@@ -36,6 +43,15 @@ const log = (msg) => {
   document.getElementById('log').scrollTop = 1e9;
 };
 
+let bleDevice = null;
+
+document.getElementById('disconnect').addEventListener('click', () => {
+  if (bleDevice && bleDevice.gatt.connected) {
+    log('Disconnecting cleanly...');
+    bleDevice.gatt.disconnect();
+  }
+});
+
 document.getElementById('connect').addEventListener('click', async () => {
   try {
     log('Requesting device...');
@@ -43,9 +59,13 @@ document.getElementById('connect').addEventListener('click', async () => {
       filters: [{ services: [UART_SERVICE] }],
       optionalServices: [UART_SERVICE]
     });
+    bleDevice = device;
     log(`Selected: ${device.name || '(no name)'}`);
 
-    device.addEventListener('gattserverdisconnected', () => log('Disconnected.'));
+    device.addEventListener('gattserverdisconnected', () => {
+      log('Disconnected.');
+      document.getElementById('disconnect').disabled = true;
+    });
 
     const server = await device.gatt.connect();
     const service = await server.getPrimaryService(UART_SERVICE);
@@ -58,6 +78,7 @@ document.getElementById('connect').addEventListener('click', async () => {
       log('RX: ' + text);
     });
 
+    document.getElementById('disconnect').disabled = false;
     log('Connected. Waiting for data...');
   } catch (error) {
     log('FAILED: ' + error.message);
