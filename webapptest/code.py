@@ -52,11 +52,36 @@ while True:
         except Exception:  # noqa: BLE001
             pass
 
-    # len(ble.connections) distinguishes the two failure shapes: 0 means no
-    # connection object was created for this run at all, which points at the
-    # bonded-reconnect path rather than at the flag itself.
+    # Four independent observables, printed side by side. The point is to show
+    # which of them disagree:
+    #
+    #   ble.connected            radio level
+    #   len(ble.connections)     0 means no connection object exists at all
+    #   connection.connected     per connection
+    #   connection.paired        whether the board thinks a bond is in place
+    #
+    # If connections is non-empty and connection.connected is True while
+    # ble.connected is False, the fault is the radio-level property. If
+    # connections is 0 while the browser is receiving data, the link was never
+    # registered and the fault is deeper.
     print("n:", n,
           "| write_ok:", write_ok,
           "| ble.connected:", ble.connected,
           "| connections:", len(ble.connections))
+
+    for i, connection in enumerate(ble.connections):
+        # Guarded individually: these properties are the suspect surface, so a
+        # raise here is itself a result worth seeing rather than a crash.
+        try:
+            conectada = connection.connected
+        except Exception as e:  # noqa: BLE001
+            conectada = "raised: {}".format(e)
+        try:
+            emparejada = connection.paired
+        except Exception as e:  # noqa: BLE001
+            emparejada = "raised: {}".format(e)
+        print("    connection", i,
+              "| connected:", conectada,
+              "| paired:", emparejada)
+
     time.sleep(1)
